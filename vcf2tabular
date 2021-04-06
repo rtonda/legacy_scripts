@@ -1,0 +1,471 @@
+#!/apps/PERL/5.18.1/bin/perl
+
+use strict;
+use warnings;
+
+use Benchmark;
+use Carp;
+use Excel::Writer::XLSX;
+use Getopt::Long;
+use lib '/project/production/DAT/lib/perl/DAT';
+use DAT_common;
+use SnpEffParser;
+use Vcf;
+
+our $VERSION='1.0.0 - 20160719';
+
+my $usage=qq{
+Usage:   $0 [options]
+Options:
+    -i STR		input file.
+    -o STR		output file
+    -oType    STR xlsx or tab [xlsx]
+    -excludeWarnings    BOOL    T or F [F]
+    -classic    BOOL    (T or F) [F]
+    -info STR	comma-separated INFO fields from the VCF file to print out. 'F' to exclude all the fields. Default all values
+    -format STR	comma-separated FORMAT fields from the VCF file to print out. 'F' to exclude all the fields. Default GT,DP,GQ
+    -id STR		comma-separated ID fields from the VCF file to print out. 'F' to exclude all the fields. Default all values
+    -filter STR	comma-separated FILTER fields from the VCF file to print out. 'F' to exclude all the filters. Default print all Filters fields.
+    -snpEff STR	comma-separated snpEff fields from the VCF file to print out. 'F' to exclude all the fields. Default print all snpEff fields.
+    -l,--legend STR	 [\$opts{LEGEND}]
+        1. Not defined: Standard legend from VCF header will be created in a separate worksheet
+        2. 'F' : no legend created
+        3. File name: a legend will be created from the input file. The input file must have 5 columns (NAME; DESCRIPTION; COLUMN TYPE; FROM; USAGE)
+    -title STR		property of output excel file. Default Variant calling
+    -author STR		property of output excel file. Default CNAG
+    -company STR	property of output excel file. Default CNAG
+    -asep STR	separator for multiple alternative alleles. By default, ",".
+Note: info, format and id rely on the heading descriptions in the VCF files.
+##\n};
+	
+## Main ##
+my %opts = (
+    ASEP        =>  ',',
+    author      =>  'CNAG',
+    CLASSIC     =>  'F',
+    company     =>  'CNAG',
+    EXCLUDEWARNINGS=>   'F',
+    FILTER      =>  undef,
+    FORMAT      =>  'GT,DP,GQ',
+    HELP        =>  undef,
+    ID          =>  undef,
+    INFO        =>  undef,
+    INPUT       =>  undef,
+    LEGEND      =>  undef,
+    OLPT        =>  'F',
+    OTYPE       =>  'xlsx',
+    OUTPUT      =>  undef,
+    SAMPLES     =>  undef,
+    SNPEFF      =>  undef,
+    title       =>  'Variant calling',
+    TMPDIR      =>  '/scratch_tmp',
+);
+
+my $results = GetOptions (
+    'asep:s'                    =>  \$opts{ASEP},
+    'author:s'                  =>  \$opts{author},
+    'classic:s'                 =>  \$opts{CLASSIC},
+    'company:s'                 =>  \$opts{company},
+    'excludeWarnings:s'         =>  \$opts{EXCLUDEWARNINGS},
+    'filter:s'                  =>  \$opts{FILTER},
+    'format:s'                  =>  \$opts{FORMAT},
+    'h|help'                    =>  \$opts{HELP},
+    'id:s'                      =>  \$opts{ID},
+    'info:s'                    =>  \$opts{INFO},
+    'i:s'                       =>  \$opts{INPUT},
+    'l|legend:s'                =>  \$opts{LEGEND},
+    'oneLinePerTranscript:s'    =>  \$opts{OLPT},
+    'oType:s'                   =>  \$opts{OTYPE},
+    'o:s'                       =>  \$opts{OUTPUT},
+    'samples:s'                 =>  \$opts{SAMPLES},
+    'snpEff:s'                  =>  \$opts{SNPEFF},
+    'title:s'                   =>  \$opts{title},
+    'tmpDir:s'                  =>  \$opts{TMPDIR},
+);
+
+## Checking interrupting options ##
+if (defined $opts{HELP}) {die $usage};
+if (($opts{OTYPE} ne 'xlsx')&&($opts{OTYPE} ne 'tab')&&($opts{OTYPE} ne 'tab.gz')) {
+    croak "ERROR: Unknown oType. Valid options are xlsx, tab and tab.gz.\n$usage"
+}
+if (($opts{EXCLUDEWARNINGS} ne 'F')&&($opts{EXCLUDEWARNINGS} ne 'T')) {
+    croak "ERROR: Unknown excludeWarnings value. Valid options are T or F.\n$usage"
+}
+
+my $t0=Benchmark->new();
+## Input and output files handling ##
+# Input
+my $input_fh;
+if ((!defined $opts{INPUT})||($opts{INPUT} eq '-')||($opts{INPUT} eq 'STDIN')) {
+    $opts{INPUT}='-';
+    $input_fh=get_input($opts{INPUT});
+    $opts{INPUT}='Default'
+}
+else {
+    $input_fh=get_input($opts{INPUT});
+}
+
+# Output
+if ((!defined $opts{OUTPUT})&&($opts{INPUT} ne '-')) {
+    $opts{OUTPUT}=$opts{INPUT}.'.'.$opts{OTYPE};
+}
+elsif ((!defined $opts{OUTPUT})&&($opts{INPUT} eq '-')) {
+    croak $usage
+};
+
+my ($output_fh, $workbook, $worksheetName, $worksheet, $headerformat, $excelformat);
+if ($opts{OTYPE} eq 'xlsx') {
+    # Create a new Excel workbook
+    $workbook = Excel::Writer::XLSX->new($opts{OUTPUT});
+    $workbook->set_tempdir($opts{TMPDIR});
+    $workbook->set_optimization();
+    my $date = `date`;
+    my $author = `whoami`;
+    $workbook->set_properties(
+        title       => $opts{title},
+        author      => $author,
+        company     => $opts{company},
+        comments    => $date,
+    );
+
+    #  Add and define formats
+    $headerformat = $workbook->add_format(); # Add a format
+    $excelformat = $workbook->add_format(); # Add a format
+    $headerformat->set_format_properties(bold => 1, color => 32, align => 'center', font =>'Arial', size =>7 );
+    $excelformat->set_format_properties(align => 'right', font =>'Arial', size =>7 );
+    
+    # Add a worksheet
+    $worksheetName = $opts{INPUT};
+    if (length($worksheetName) > 31){
+        $worksheetName =~ /(\w+)\..*/;
+        $worksheetName = $1
+    };
+    $worksheet = $workbook->add_worksheet($worksheetName);
+}
+else {
+    # Print to a compressed or uncompressed plain text file
+    $output_fh=set_output($opts{OUTPUT});
+}
+
+# Parsing the header of the vcf file
+my $vcfi=Vcf->new(fh=>$input_fh, silent=>1);
+$vcfi->parse_header();
+ 
+# Init snpEff parser
+my $snpeffparseri;
+if ((!defined $opts{SNPEFF})||($opts{SNPEFF} ne 'F')) {
+	$snpeffparseri=SnpEffParser->new({vcf=>$vcfi});
+}
+
+# General purpose variables
+my (%index,@allSamplesNames,@sampleName,%sampleIndex,%target_field,%target_field_index,@header,%is_a_flag,@snpEff_alias);
+my @groups=qw(MANDATORY SNPEFF INFO ID FILTER FORMAT);
+my @header_groups=qw(MANDATORY SNPEFF INFO ID FILTER SAMPLEFORMAT);
+
+# Fields description
+my %legend=(
+    ALT     => 'Alternative allele',
+    CHROM   => 'Chromosome',
+    POS     => 'Position',
+    QUAL    => 'Call quality',
+    REF     => 'Reference allele',
+);
+
+## Doing real stuff ##
+# Indexing vcf columns and target samples
+my @tmpSamples  =   defined $opts{SAMPLES}  ?   split(/,/,$opts{SAMPLES})
+                :                               ();
+
+COLINDEX:
+for my $i(0..$#{$vcfi->{columns}}) {
+    my $col=$vcfi->{columns}[$i];
+    $col=~s/\#//;
+    $index{$col}=$i;
+    if ($i>=9) {
+        push @allSamplesNames,$col;
+        $sampleIndex{$col}=$i;
+        if ((scalar(@tmpSamples)>0) && (!grep {$_ eq $col} @tmpSamples)) {
+            next COLINDEX;
+        }
+        else {
+            push @{$target_field{SAMPLES}}, $col;
+            push @{$target_field_index{SAMPLES}}, $i;
+        }
+    }
+};
+
+# Formatting the header of the file #
+@{$target_field{MANDATORY}}=qw (CHROM POS REF ALT QUAL);
+
+# Getting SNPEFF INFO ID FILTER
+for my $f(qw(SNPEFF INFO ID FILTER)) {
+    @{$target_field{$f}}=parse_fields($f);
+};
+
+# Getting FORMAT
+@{$target_field{FORMAT}}=split(/,/,$opts{FORMAT});
+foreach my $sample(@{$target_field{SAMPLES}}) {
+    foreach my $format_field(@{$target_field{FORMAT}}) {
+        push @{$target_field{SAMPLEFORMAT}}, join('_',($sample,$format_field))
+    }
+};
+
+foreach my $group(@header_groups) {
+    if (scalar(@{$target_field{$group}})>0) {push (@header,@{$target_field{$group}})}    
+};
+
+my $row=0;
+my $last_col_index=$#header;
+if ($opts{OTYPE} eq 'xlsx') {
+    print_to_xlsx(
+        printable_ar    =>  \@header,
+        row             =>  $row,
+        style           =>  \$headerformat,
+        worksheet       =>  \$worksheet,
+    );
+    $worksheet->autofilter($row,$row,$row,$last_col_index); # Autofilter first row
+    $worksheet->freeze_panes(1, $row)
+}
+else {
+	print {$output_fh} '#';
+	print_to_tab(\@header)
+};
+
+# Processing data
+my $variant=0;
+VARIANT:
+while (my $line=$vcfi->next_line()) {
+    chomp $line;
+    $variant++;
+    my @line=split(/\t/, $line);
+
+    my @mandatory_printable;
+    foreach my $m(@{$target_field{MANDATORY}}) {
+        push @mandatory_printable, $line[$index{$m}]
+    };
+
+    my %vcf_values;
+
+    #INFO ID FILTER
+    foreach my $target_group(qw(INFO ID FILTER)) {
+        if (scalar(@{$target_field{$target_group}})>0) {
+            foreach my $tf(@{$target_field{$target_group}}) {
+                my $tf_query=$vcfi->get_info_field($line[$index{$target_group}],$tf);
+                if (!defined $tf_query) {
+                    push @{$vcf_values{$target_group}},''
+                }
+                elsif ($tf_query eq '1') {
+                    if (exists $is_a_flag{$target_group}{$tf}) {
+                        push @{$vcf_values{$target_group}},$tf
+                    }
+                    else {
+                        push @{$vcf_values{$target_group}},$tf_query
+                    }
+                }
+                else {
+                    if (($tf_query=~/$tf=/)||($tf=~/^GERP/)) {
+                        my @simplified_tf_query=split(/,/,$tf_query);
+                        push @{$vcf_values{$target_group}},$simplified_tf_query[0]
+                    }
+                    else {
+                        push @{$vcf_values{$target_group}},$tf_query
+                    }
+                }
+            }
+        }
+        else {
+            @{$vcf_values{$target_group}}=();
+        }
+    }
+
+    #SAMPLEINFO
+    my @format=split(/:/,$line[$index{FORMAT}]);
+    my %format_index;
+    for my $i(0..$#format) {
+        $format_index{$format[$i]}=$i
+    }
+    
+    foreach my $sample(@{$target_field{SAMPLES}}) {
+        foreach my $format_field(@{$target_field{FORMAT}}) {
+            my $format_field_value=$vcfi->get_field($line[$index{$sample}],$format_index{$format_field});
+            if (!defined $format_field_value) {
+                push @{$vcf_values{SAMPLEFORMAT}},''
+            }
+            else {
+                push @{$vcf_values{SAMPLEFORMAT}},$format_field_value
+            }
+        }
+    };
+    
+    #SNPEFF
+    my @snpEff_AoA;
+    if (scalar(@{$target_field{SNPEFF}})>0) {
+        my %snpEff_annotation;
+        my $allEffects=$vcfi->get_info_field($line[$index{INFO}],$snpeffparseri->Type());
+		if (defined $allEffects) {
+	        my @allEffects=$snpeffparseri->get_all_effects_array($allEffects);
+    	    foreach my $effect(@allEffects)	{
+    	        chomp $effect;
+    	        my @effArray=$snpeffparseri->get_eff_array($effect);
+    	        if ($opts{OLPT} eq 'T') {
+    	            my @tmp_snpEff_annotation;
+    	            foreach my $alias(@snpEff_alias) {
+    	                my $res=$snpeffparseri->get_byAlias(\@effArray,$alias) || '';
+    	                if (!defined $res) {$res=''};
+    	                push @tmp_snpEff_annotation, $res
+    	            }
+    	            push @snpEff_AoA, \@tmp_snpEff_annotation
+    	        }
+    	        else {
+    	            my $effect=$snpeffparseri->get_byAlias(\@effArray,'effect');
+    	            foreach my $alias(@snpEff_alias) {
+    	                my $res=$snpeffparseri->get_byAlias(\@effArray,$alias);
+    	                if ($opts{CLASSIC} eq 'F') {
+    	                    if (defined $res && $res ne '') {
+    	                        $snpEff_annotation{$effect}{$alias}{$res}=1
+    	                    }
+    	                }
+    	                else {
+    	                    if (defined $res  && $res ne '') {
+    	                        if ($alias eq 'impact') {
+    	                            @{$snpEff_annotation{$effect}{$alias}}=($res)
+    	                        }
+    	                        else{
+    	                            push @{$snpEff_annotation{$effect}{$alias}}, $res
+    	                        }
+    	                    }
+    	                }
+    	            }
+    	        }
+    	    }
+        	if ($opts{OLPT} eq 'F') {
+            	foreach my $effect(sort keys %snpEff_annotation) {
+            	    my @tmp_snpEff_annotation;
+            	    foreach my $alias(@snpEff_alias) {
+            	        if ($opts{CLASSIC} eq 'F') {
+            	            if (scalar(keys %{$snpEff_annotation{$effect}{$alias}})>0) {
+            	                push @tmp_snpEff_annotation, join(';',sort keys %{$snpEff_annotation{$effect}{$alias}})
+            	            }
+            	            else {
+            	                push @tmp_snpEff_annotation,''
+            	            }
+            	        }
+            	        else {
+            	            if (scalar(keys @{$snpEff_annotation{$effect}{$alias}})>0) {
+            	                push @tmp_snpEff_annotation, join(';',@{$snpEff_annotation{$effect}{$alias}})
+            	            }
+            	            else {
+            	                push @tmp_snpEff_annotation,''
+            	            }
+            	        }
+            	    }
+            	    push @snpEff_AoA, \@tmp_snpEff_annotation
+            	}
+        	}
+    	}
+		else {
+            my @tmp_snpEff_annotation;
+            foreach my $alias(@snpEff_alias) {
+                push @tmp_snpEff_annotation, ''
+            }
+            push @snpEff_AoA, \@tmp_snpEff_annotation
+		}
+	}
+    else {
+        @{$vcf_values{SNPEFF}}=();
+        push @snpEff_AoA, \@{$vcf_values{SNPEFF}};
+    }
+
+    for my $aoa_row(0..$#snpEff_AoA) {
+        $row++;
+        my @printable=(@mandatory_printable,@{$snpEff_AoA[$aoa_row]},@{$vcf_values{INFO}},@{$vcf_values{ID}},@{$vcf_values{FILTER}},@{$vcf_values{SAMPLEFORMAT}});
+        if ($opts{OTYPE} eq 'xlsx') {
+            print_to_xlsx(
+                printable_ar    =>  \@printable,
+                row             =>  $row,
+                style           =>  \$excelformat,
+                worksheet       =>  \$worksheet,
+            );
+        }
+        else {
+            print_to_tab(\@printable)
+        }
+    };
+    if (($variant % 1000)==0) {
+        my $t1=Benchmark->new();
+        my $td = timediff($t1, $t0);
+        print {\*STDERR} "Processed ... $variant variants. Elapsed time: ",timestr($td),"\r"}
+}
+print {\*STDERR} "\n";
+
+exit;
+
+sub print_to_tab {
+    my $printable_ar=shift;
+    print {$output_fh} join("\t",@$printable_ar),"\n"
+}
+
+sub print_to_xlsx {
+    my %args=(
+        @_,
+    ); 
+    my $row=$args{row};
+    my $printable_ar=$args{printable_ar};
+    my $worksheet=$args{worksheet};
+    my $style=$args{style};
+    for my $col(0..$#{$printable_ar}) {
+        $$worksheet->write($row, $col, $$printable_ar[$col],$$style);
+    }
+}
+
+sub parse_fields {
+    my $tf=shift;
+    my @final_fields;
+    my @all_possible_fields =   (($tf eq 'SNPEFF')&&($opts{SNPEFF} eq 'F')) ?   ()
+                            :   $tf eq 'SNPEFF'								?	@{$snpeffparseri->Format()}
+                            :                       							sort keys %{${$vcfi->get_header_line(key=>$tf)}[0]};
+
+    if (!defined $opts{$tf}) {
+        if (($tf eq 'SNPEFF') && ($opts{EXCLUDEWARNINGS} eq 'T')) {
+            @final_fields= grep {$_ !~ /WARNING|ERROR|INFO/i} @all_possible_fields
+        }
+        else {
+            if ($tf eq 'INFO') {
+                @final_fields= grep {$_ !~ /EFF|ANN/} @all_possible_fields
+            }
+            else {
+                @final_fields=@all_possible_fields;
+            }
+        }
+    }
+    elsif ($opts{$tf} eq 'F') {
+        @final_fields=();
+    }
+    else {
+        my @tmp_fields=split(/,/,$opts{$tf});
+        foreach my $tmp_field(@tmp_fields) {
+            if (grep {$_ eq $tmp_field} @all_possible_fields) {
+                push @final_fields,$tmp_field;
+            }
+            else {croak "ERROR: $tmp_field is not a defined filter field.\n\nInput file $opts{INPUT} has the following $tf fields:\n",join(',',@all_possible_fields),"\n"};
+        }
+    };
+	if (scalar(@final_fields)>=1) {
+	    foreach my $tmp_field(@final_fields) {
+    	    if ($tf eq 'SNPEFF') {
+    	        $legend{$tmp_field}='http://snpeff.sourceforge.net/';
+    	        push @snpEff_alias, $snpeffparseri->get_alias($tmp_field)
+    	    }
+    	    else {
+    	        my $description=${$vcfi->get_header_line(key=>$tf,ID=>$tmp_field)}[0]{Description};
+    	        my $annotation_type=${$vcfi->get_header_line(key=>$tf,ID=>$tmp_field)}[0]{Type};
+    	        $legend{$tmp_field}=$description;
+    	        if (($tf eq 'FILTER')||($annotation_type eq 'Flag')) {$is_a_flag{$tf}{$tmp_field}=1}
+    	    }
+		}
+    };
+
+    return @final_fields
+}
+
+exit
