@@ -57,7 +57,7 @@ my %opts = (
     SAMPLES     =>  undef,
     SNPEFF      =>  undef,
     title       =>  'Variant calling',
-    TMPDIR      =>  '/scratch_tmp',
+    TMPDIR      =>  '$TMPDIR',
 );
 
 my $results = GetOptions (
