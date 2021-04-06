@@ -1,10 +1,9 @@
-#!/apps/PERL/5.18.1/bin/perl
+#!/usr/bin/env perl
 
 package SnpEffParser;
 
 use Carp;
 use Moose;
-use lib '/project/production/DAT/lib/perl/DAT';
 use Vcf;
 
 our $VERSION='1.0.1';
