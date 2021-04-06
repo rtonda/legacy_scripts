@@ -1,4 +1,4 @@
-#!/apps/PERL/5.18.1/bin/perl
+#!/usr/bin/env perl
 
 package DAT_common;
 
