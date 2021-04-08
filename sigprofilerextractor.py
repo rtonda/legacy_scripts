@@ -81,6 +81,12 @@ def get_rspeoptions(argv):
         action='store_true',
         help='BOOL Make decomposition plots',
     )
+    rspe_parser.add_argument(
+        '--debug',
+        '-D',
+        action='store_true',
+        help='BOOL Print options values and exit',
+    )
     return rspe_parser.parse_args(argv)
 
 
@@ -107,12 +113,15 @@ def validate_options(options):
     options.input_dir = os.path.abspath(options.input_dir)
     options.output_dir  = os.path.abspath(options.output_dir)
     if options.restrict_to_exome is False:
-        options.output_dir = options.input_dir + '/notRestrictedExome'
+        options.output_dir = options.output_dir + '/notRestrictedExome'
     else:
-        options.output_dir = options.input_dir + '/restrictedExome'
+        options.output_dir = options.output_dir + '/restrictedExome'
     if options.minimum_signatures > options.maximum_signatures:
         raise ValueError('ERROR: the value of the option minimum_signatures\
  must be smaller than the value of the option maximum_signatures')
+    if options.debug is True:
+        print(options)
+        exit()
 
 
 def main():
@@ -121,7 +130,7 @@ def main():
     elif len(sys.argv) > 1:
         spe_opts = get_rspeoptions(sys.argv[1:])
         validate_options(spe_opts)
-        compute_coronary_heart_disease_risk(spe_opts)
+        run_sigProfilerExtractor(spe_opts)
         sys.exit(0)
 
 
